@@ -1,232 +1,276 @@
 # Mihomo/Clash Remote Server Manager
 
-Core proxy functionality is provided by [@MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo). This repository only adds a lightweight management script for running mihomo on a remote Linux server.
+基础代理能力来自 [@MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo)。本仓库只提供一个轻量管理脚本，用来在远程 Linux 服务器上更方便地启动、停止、更新配置和查看日志。
 
-Chinese documentation is available in [README_zh.md](README_zh.md).
+这个小工具用于在远程 Linux 服务器上管理 `mihomo`/`clash`：
 
-This tool helps you manage `mihomo`/`clash` on a remote Linux server:
+- 后台启动代理
+- 自动选择脚本配置的 mixed-port，默认 `7897`，也可用 `MIHOMO_PORT` 覆盖
+- 避免重复启动：如果已有记录中的 mihomo 进程在运行，`start` 不会再拉起第二个进程
+- 查看运行状态和日志
+- 停止代理
+- 下载/更新 Clash/Mihomo 订阅配置
+- 更换订阅 token
+- 维护 VSCode/Codex/终端可用的代理环境变量文件
 
-- Start the proxy in the background
-- Check runtime status and logs
-- Stop the proxy
-- Download or refresh a Clash/Mihomo subscription config
-- Replace the subscription token
-- Print proxy environment variables for VSCode, Codex, and terminal commands
-
-Default paths:
+默认路径与你当前操作一致：
 
 ```text
 ~/.config/mihomo/clash-linux
 ~/.config/mihomo/config.yaml
 ~/.config/mihomo/mihomo.log
+~/.config/mihomo/mihomo.pid
+~/.config/mihomo/proxy.env
 ```
 
-## 1. Prepare Mihomo Files
+## 1. 准备 mihomo 基础文件
 
-This setup flow is adapted from the [bannedbook/fanqiang Linux guide](https://github.com/bannedbook/fanqiang/blob/5cb11c6420a95cdc83c4a29ffc54e2cd9e4689d4/linux/readme.md). It prepares the working directory, mihomo binary, and geodata files.
+本节整理自 [bannedbook/fanqiang 的 Linux 教程](https://github.com/bannedbook/fanqiang/blob/5cb11c6420a95cdc83c4a29ffc54e2cd9e4689d4/linux/readme.md)，用于完成前期目录、二进制文件和地理数据库准备。
 
-Create and enter the program directory:
+创建并进入程序目录：
 
 ```bash
 mkdir -p ~/.config/mihomo
 cd ~/.config/mihomo
 ```
 
-Download the Linux amd64 mihomo binary:
+下载 Linux amd64 版本的 mihomo/clash：
 
 ```bash
 wget -O clash-linux.gz https://github.com/MetaCubeX/mihomo/releases/download/v1.17.0/mihomo-linux-amd64-v1.17.0.gz
 ```
 
-If this release link no longer works, open [MetaCubeX/mihomo Releases](https://github.com/MetaCubeX/mihomo/releases), choose the correct `linux-amd64` or `linux-arm64` build for your server, and place the downloaded file at:
+如果这个版本链接失效，去 [MetaCubeX/mihomo Releases](https://github.com/MetaCubeX/mihomo/releases) 选择适合你服务器架构的 `linux-amd64` / `linux-arm64` 版本，并把下载后的文件放到：
 
 ```text
 ~/.config/mihomo/clash-linux.gz
 ```
 
-Decompress it and make it executable:
+解压并授权：
 
 ```bash
 gzip -f clash-linux.gz -d
 chmod +x clash-linux
 ```
 
-Run mihomo once so it can generate default files. Wait briefly, then press `Ctrl+C` to stop it:
+初始化执行一次，让 mihomo 生成默认文件；启动后等一会儿，然后按 `Ctrl+C` 退出：
 
 ```bash
 ./clash-linux
 ```
 
-Check the directory:
+查看目录：
 
 ```bash
 ls -rtl ~/.config/mihomo/
 ```
 
-If `Country.mmdb` was not generated automatically, download it manually:
+如果 `Country.mmdb` 没有自动生成，可以手动下载：
 
 ```bash
 wget -O ~/.config/mihomo/Country.mmdb https://github.com/Dreamacro/maxmind-geoip/releases/latest/download/Country.mmdb
 ```
 
-If `GeoSite.dat` was not generated automatically, you can later run `update-geodata` from this script, or download it manually:
+如果 `GeoSite.dat` 没有自动生成，可以先用脚本后面的 `update-geodata` 命令补齐；或者手动下载后放到 `~/.config/mihomo/`：
 
 ```bash
 wget -O ~/.config/mihomo/GeoSite.dat https://github.com/ewigl/mihomo/raw/master/GeoSite.dat
 ```
 
-## 2. Clone This Manager
+## 2. 克隆本管理脚本
 
-Clone this repository on the remote server:
+在远程服务器上克隆这个仓库：
 
 ```bash
 cd ~/.config/mihomo
 git clone https://github.com/BillyLiu312/mihomo-manager.git manager
 ```
 
-Enter the repository and make the script executable:
+进入仓库并确认脚本可执行：
 
 ```bash
 cd ~/.config/mihomo/manager
 chmod +x mihomoctl.sh
 ```
 
-Run the following commands from this directory:
+后续命令都在这个目录执行：
 
 ```bash
 cd ~/.config/mihomo/manager
 ```
 
-## 3. Configure The Subscription
+## 3. 首次配置订阅
 
-Always quote the URL, because subscription URLs usually contain `&`.
+注意：URL 一定要加引号，因为里面通常有 `&`。
 
 ```bash
 ./mihomoctl.sh init
-./mihomoctl.sh set-url 'https://your-subscription-host/api/v1/client/subscribe?token=YOUR_TOKEN&flag=clash'
+./mihomoctl.sh set-url 'https://你的订阅地址/api/v1/client/subscribe?token=你的token&flag=clash'
 ./mihomoctl.sh fetch
 ```
 
-`set-url` automatically appends `flag=clash` when it is missing. The subscription URL is stored in:
+`set-url` 会自动补上 `flag=clash`，并把 token 存到：
 
 ```text
 ~/.config/mihomo/subscription.env
 ```
 
-The file is written with `600` permissions.
+这个文件权限会设置为 `600`。
 
-## 4. Start In The Background
+`init` 还会创建或维护：
+
+```text
+~/.config/mihomo/proxy.env
+```
+
+并在 `~/.bashrc` 里追加一行 source hook：
+
+```bash
+[ -f "$HOME/.config/mihomo/proxy.env" ] && . "$HOME/.config/mihomo/proxy.env"
+```
+
+之后脚本会通过改写 `proxy.env` 来启用或停用代理环境变量，避免每次手动改 `.bashrc`。
+
+## 4. 后台启动
 
 ```bash
 ./mihomoctl.sh start
 ```
 
-Check status:
+`start` 会做几件事：
+
+- 把 `config.yaml` 里的 `mixed-port` 写成当前脚本端口，默认是 `7897`
+- 如果 `~/.config/mihomo/mihomo.pid` 指向的进程还活着，只刷新端口配置和 `proxy.env`，不会重复启动
+- 后台启动 mihomo，并把日志写到 `~/.config/mihomo/mihomo.log`
+- 启动成功后把代理环境变量写入 `~/.config/mihomo/proxy.env`
+
+查看状态：
 
 ```bash
 ./mihomoctl.sh status
 ```
 
-View recent logs:
+查看日志：
 
 ```bash
 ./mihomoctl.sh logs
 ```
 
-Follow logs:
+持续跟踪日志：
 
 ```bash
 ./mihomoctl.sh logs -f
 ```
 
-## 5. Use The Proxy From Terminal, VSCode, Or Codex
+## 5. 让当前终端 / VSCode / Codex 走代理
 
-After startup, the default mixed HTTP/SOCKS proxy is:
+启动成功后，默认代理端口是：
 
 ```text
-127.0.0.1:7890
+127.0.0.1:7897
 ```
 
-Set proxy variables in the current shell:
+如果你想换端口，可以在命令前设置 `MIHOMO_PORT`。例如：
 
 ```bash
-eval "$(~/.config/mihomo/manager/mihomoctl.sh env)"
+MIHOMO_PORT=7890 ./mihomoctl.sh start
 ```
 
-Test connectivity:
+脚本会把 `config.yaml` 的 `mixed-port` 同步改成这个端口，并让 `env`、`run`、`test` 等命令使用同一个端口。
+
+临时设置当前终端：
 
 ```bash
-curl https://api.openai.com/v1/models -I
+[ -f "$HOME/.config/mihomo/proxy.env" ] && . "$HOME/.config/mihomo/proxy.env"
 ```
 
-`401`, `403`, or `404` means the network path is reachable but the API credentials or endpoint may not be valid. A timeout usually points to a proxy or network issue.
+也可以直接打印当前端口对应的代理环境变量：
 
-Run a single command through the proxy:
+```bash
+./mihomoctl.sh env
+```
+
+测试：
+
+```bash
+./mihomoctl.sh test
+```
+
+如果返回 `401`、`403`、`404` 都说明网络连到了，只是 API 身份或路径问题；如果超时才是代理/网络问题。
+
+也可以只让某条命令走代理：
 
 ```bash
 ~/.config/mihomo/manager/mihomoctl.sh run curl https://api.openai.com/v1/models -I
 ```
 
-To make remote VSCode/Codex inherit the proxy by default, add this line to `~/.bashrc`:
+如果你想让远程 VSCode/Codex 总是继承代理，可以把下面这行放进 `~/.bashrc`：
 
 ```bash
-eval "$($HOME/.config/mihomo/manager/mihomoctl.sh env)"
+[ -f "$HOME/.config/mihomo/proxy.env" ] && . "$HOME/.config/mihomo/proxy.env"
 ```
 
-Then reload the shell:
+然后：
 
 ```bash
 source ~/.bashrc
 ```
 
-In VSCode, run this command from the command palette:
+之后在 VSCode 命令面板执行：
 
 ```text
 Remote-SSH: Kill VS Code Server on Host...
 ```
 
-Reconnect to the server so VSCode Server picks up the new environment.
+重新连接服务器，让 VSCode Server 继承新的环境变量。
 
-## 6. Replace The VPN/Subscription Token
+## 6. 更换 VPN/订阅 token
 
-If only the token changed:
+如果只是 token 变了：
 
 ```bash
 cd ~/.config/mihomo/manager
-./mihomoctl.sh set-token NEW_TOKEN
+./mihomoctl.sh set-token 新token
 ./mihomoctl.sh fetch
 ./mihomoctl.sh restart
 ```
 
-If the full subscription URL changed:
+如果整个订阅地址变了：
 
 ```bash
-./mihomoctl.sh set-url 'https://new-subscription-url?token=NEW_TOKEN&flag=clash'
+./mihomoctl.sh set-url 'https://新的订阅地址?token=新token&flag=clash'
 ./mihomoctl.sh fetch
 ./mihomoctl.sh restart
 ```
 
-## 7. Stop The Proxy
+## 7. 停止代理
 
-Stop the background mihomo process:
+停止后台 mihomo/clash：
 
 ```bash
 cd ~/.config/mihomo/manager
 ./mihomoctl.sh stop
 ```
 
-Unset proxy variables in the current shell:
+取消当前终端里的代理环境变量：
 
 ```bash
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY
-unset http_proxy https_proxy all_proxy
+. ~/.config/mihomo/proxy.env
 ```
 
-If you added `eval "$($HOME/.config/mihomo/manager/mihomoctl.sh env)"` to `~/.bashrc`, remove or comment out that line to disable it permanently.
+`stop` 会把 `proxy.env` 改成 unset 版本，所以 source 之后当前终端也会取消代理。
 
-## 8. Update GeoSite / GeoIP
+也可以直接执行：
 
-If your config depends on `GeoSite.dat` or `GeoIP.dat`:
+```bash
+eval "$(./mihomoctl.sh env-clear)"
+```
+
+如果你以前把 `eval "$($HOME/.config/mihomo/manager/mihomoctl.sh env)"` 写进了 `~/.bashrc`，建议删掉或注释掉，改用 `proxy.env` 那一行。这样 `start` 和 `stop` 才能自动控制新 shell 是否启用代理。
+
+## 8. 更新 GeoSite / GeoIP
+
+如果配置依赖 `GeoSite.dat` / `GeoIP.dat`：
 
 ```bash
 cd ~/.config/mihomo/manager
@@ -234,35 +278,55 @@ cd ~/.config/mihomo/manager
 ./mihomoctl.sh restart
 ```
 
-## 9. FAQ
+## 9. 常见问题
 
 ### `cannot unmarshal !!str c3M6Ly9...`
 
-The downloaded subscription is a base64/raw node list, not Clash/Mihomo YAML. Use a Clash/Mihomo subscription URL:
+下载到的是 base64/raw 节点订阅，不是 Clash/Mihomo YAML。解决：
 
 ```bash
-./mihomoctl.sh set-url 'YOUR_SUBSCRIPTION_URL&flag=clash'
+./mihomoctl.sh set-url '你的订阅URL&flag=clash'
 ./mihomoctl.sh fetch
 ```
 
-### The command prints `[1] 12345`
+### 命令执行后出现 `[1] 12345`
 
-The URL was not quoted, so the shell interpreted `&flag=clash` as a background-job operator. Always wrap subscription URLs in single quotes.
+URL 没加引号，shell 把 `&flag=clash` 当成后台运行符号了。订阅 URL 必须用单引号包住。
 
-### The proxy is running, but Codex still cannot connect
+### 代理启动了，但 Codex 还是连不上
 
-Check the proxy first:
+先检查：
 
 ```bash
 ./mihomoctl.sh status
-eval "$(./mihomoctl.sh env)"
-curl https://api.openai.com/v1/models -I
+. ~/.config/mihomo/proxy.env
+./mihomoctl.sh test
 ```
 
-If `curl` works but VSCode/Codex does not, restart VSCode Server:
+如果 `curl` 能连，但 VSCode/Codex 不行，重启 VSCode Server：
 
 ```text
 Remote-SSH: Kill VS Code Server on Host...
 ```
 
-Then reconnect to the remote server.
+然后重新连接远程服务器。
+
+### 启动时报端口占用
+
+如果日志里出现 mixed proxy port bind 失败，说明当前端口被占用。先看当前脚本配置：
+
+```bash
+./mihomoctl.sh config
+```
+
+然后换一个端口启动：
+
+```bash
+MIHOMO_PORT=7898 ./mihomoctl.sh restart
+```
+
+新端口会同步写入 `config.yaml` 和 `proxy.env`。如果你要长期使用该端口，可以把下面这行写进 `~/.bashrc` 中 `proxy.env` source hook 之前：
+
+```bash
+export MIHOMO_PORT=7898
+```
