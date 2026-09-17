@@ -224,7 +224,43 @@ Remote-SSH: Kill VS Code Server on Host...
 
 重新连接服务器，让 VSCode Server 继承新的环境变量。
 
-## 6. 更换 VPN/订阅 token
+## 6. 一键查看和切换节点
+
+查看当前节点和全部可选节点：
+
+```bash
+./mihomoctl.sh nodes
+```
+
+不带参数时会打开交互式编号菜单，输入编号即可切换：
+
+```bash
+./mihomoctl.sh switch
+```
+
+也可以按地区一键切换。脚本会选择该地区列表中的第一个节点：
+
+```bash
+./mihomoctl.sh switch 英国
+./mihomoctl.sh switch 美国
+./mihomoctl.sh switch 日本
+```
+
+常用英文缩写也可以使用，例如 `UK`、`US`、`JP`、`HK` 和 `SG`：
+
+```bash
+./mihomoctl.sh switch UK
+```
+
+要设置启动后的默认节点，并立即切换到该节点：
+
+```bash
+./mihomoctl.sh set-default-node 英国
+```
+
+默认节点保存在 `~/.config/mihomo/subscription.env` 中。以后重新启动 Mihomo 时会自动应用，执行 `fetch` 更新订阅也不会丢失。节点切换通过本机控制接口完成，不需要重启 Mihomo。该功能需要系统已安装 `curl` 和 `jq`。
+
+## 7. 更换 VPN/订阅 token
 
 如果只是 token 变了：
 
@@ -243,7 +279,7 @@ cd ~/.config/mihomo/manager
 ./mihomoctl.sh restart
 ```
 
-## 7. 停止代理
+## 8. 停止代理
 
 停止后台 mihomo/clash：
 
@@ -268,7 +304,7 @@ eval "$(./mihomoctl.sh env-clear)"
 
 如果你以前把 `eval "$($HOME/.config/mihomo/manager/mihomoctl.sh env)"` 写进了 `~/.bashrc`，建议删掉或注释掉，改用 `proxy.env` 那一行。这样 `start` 和 `stop` 才能自动控制新 shell 是否启用代理。
 
-## 8. 更新 GeoSite / GeoIP
+## 9. 更新 GeoSite / GeoIP
 
 如果配置依赖 `GeoSite.dat` / `GeoIP.dat`：
 
@@ -278,7 +314,7 @@ cd ~/.config/mihomo/manager
 ./mihomoctl.sh restart
 ```
 
-## 9. 常见问题
+## 10. 常见问题
 
 ### `cannot unmarshal !!str c3M6Ly9...`
 

@@ -11,6 +11,7 @@ PROXY_ENV_FILE="${MIHOMO_PROXY_ENV:-$CONFIG_DIR/proxy.env}"
 SHELL_RC_FILE="${MIHOMO_SHELL_RC:-$HOME/.bashrc}"
 MIXED_PORT="${MIHOMO_PORT:-7897}"
 DEFAULT_UA="${MIHOMO_USER_AGENT:-Clash.Meta}"
+DEFAULT_SELECTOR="${MIHOMO_SELECTOR:-🔰 选择节点}"
 
 usage() {
   cat <<'USAGE'
@@ -25,6 +26,9 @@ Usage:
   ./mihomoctl.sh stop
   ./mihomoctl.sh restart
   ./mihomoctl.sh status
+  ./mihomoctl.sh nodes
+  ./mihomoctl.sh switch [地区或节点名]
+  ./mihomoctl.sh set-default-node 地区或节点名
   ./mihomoctl.sh logs [-f] [-n 100]
   ./mihomoctl.sh test [URL]
   ./mihomoctl.sh env
@@ -40,6 +44,7 @@ Environment overrides:
   MIHOMO_PORT        default: 7897
   MIHOMO_PROXY_ENV   default: ~/.config/mihomo/proxy.env
   MIHOMO_SHELL_RC    default: ~/.bashrc
+  MIHOMO_SELECTOR    default: 🔰 选择节点
 
 Notes:
   - Tokens are stored in ~/.config/mihomo/subscription.env with chmod 600.
@@ -119,6 +124,79 @@ load_env() {
   fi
   SUB_URL="${SUB_URL:-}"
   USER_AGENT="${USER_AGENT:-$DEFAULT_UA}"
+  DEFAULT_NODE="${DEFAULT_NODE:-}"
+}
+
+require_api_tools() {
+  command -v curl >/dev/null 2>&1 || die "curl is required for node switching"
+  command -v jq >/dev/null 2>&1 || die "jq is required for node switching"
+}
+
+api_settings() {
+  [[ -f "$CONFIG_FILE" ]] || die "config not found: $CONFIG_FILE"
+  API_CONTROLLER="$(sed -n -E "s/^[[:space:]]*external-controller:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?.*/\1/p" "$CONFIG_FILE" | head -n 1)"
+  API_CONTROLLER="${API_CONTROLLER:-127.0.0.1:9090}"
+  [[ "$API_CONTROLLER" == 0.0.0.0:* ]] && API_CONTROLLER="127.0.0.1:${API_CONTROLLER##*:}"
+  [[ "$API_CONTROLLER" == :* ]] && API_CONTROLLER="127.0.0.1$API_CONTROLLER"
+  API_BASE="http://$API_CONTROLLER"
+  API_SECRET="$(sed -n -E "s/^[[:space:]]*secret:[[:space:]]*['\"]?([^'\"]*)['\"]?[[:space:]]*$/\1/p" "$CONFIG_FILE" | head -n 1)"
+}
+
+api_curl() {
+  local args=(--silent --show-error --fail --connect-timeout 3 --max-time 10)
+  [[ -n "$API_SECRET" ]] && args+=(-H "Authorization: Bearer $API_SECRET")
+  curl "${args[@]}" "$@"
+}
+
+selector_url() {
+  printf "%s/proxies/%s" "$API_BASE" "$(printf "%s" "$DEFAULT_SELECTOR" | jq -sRr @uri)"
+}
+
+selector_json() {
+  require_api_tools
+  api_settings
+  api_curl "$(selector_url)" || die "cannot connect to Mihomo API at $API_BASE; start Mihomo first"
+}
+
+region_query() {
+  case "$1" in
+    uk|UK|gb|GB|英国) printf "英国" ;;
+    us|US|usa|USA|美国) printf "美国" ;;
+    jp|JP|japan|Japan|日本) printf "日本" ;;
+    hk|HK|hongkong|HongKong|香港) printf "香港" ;;
+    sg|SG|singapore|Singapore|新加坡) printf "新加坡" ;;
+    tw|TW|taiwan|Taiwan|台湾) printf "台湾" ;;
+    kr|KR|korea|Korea|韩国) printf "韩国" ;;
+    de|DE|germany|Germany|德国) printf "德国" ;;
+    ca|CA|canada|Canada|加拿大) printf "加拿大" ;;
+    au|AU|australia|Australia|澳大利亚) printf "澳大利亚" ;;
+    fr|FR|france|France|法国) printf "法国" ;;
+    *) printf "%s" "$1" ;;
+  esac
+}
+
+resolve_node() {
+  local query
+  query="$(region_query "$1")"
+  jq -r --arg query "$query" '
+    ([.all[] | select(. == $query)][0]
+      // [.all[] | select(contains($query))][0]
+      // empty)
+  '
+}
+
+switch_to_query() {
+  local query="$1"
+  local data node
+  require_api_tools
+  api_settings
+  data="$(selector_json)"
+  node="$(resolve_node "$query" <<< "$data")"
+  [[ -n "$node" ]] || die "no node matching '$query'; run '$0 nodes' to see available nodes"
+  api_curl -X PUT "$(selector_url)" \
+    -H "Content-Type: application/json" \
+    --data "$(jq -nc --arg name "$node" '{name: $name}')" >/dev/null
+  info "switched to: $node"
 }
 
 quote_value() {
@@ -321,10 +399,58 @@ cmd_start() {
     write_proxy_env on
     info "started, pid=$pid, log=$LOG_FILE"
     info "proxy env enabled in $PROXY_ENV_FILE"
+    load_env
+    if [[ -n "$DEFAULT_NODE" ]]; then
+      local ready=0
+      for _ in 1 2 3 4 5; do
+        if switch_to_query "$DEFAULT_NODE"; then
+          ready=1
+          break
+        fi
+        sleep 1
+      done
+      [[ "$ready" -eq 1 ]] || die "started, but failed to apply default node: $DEFAULT_NODE"
+    fi
   else
     tail -n 80 "$LOG_FILE" >&2 || true
     die "failed to start"
   fi
+}
+
+cmd_nodes() {
+  local data
+  data="$(selector_json)"
+  echo "Selector : $DEFAULT_SELECTOR"
+  echo "Current  : $(jq -r '.now' <<< "$data")"
+  echo
+  jq -r '.all | to_entries[] | "\(.key + 1)\t\(.value)"' <<< "$data"
+}
+
+cmd_switch() {
+  local data choice node
+  if [[ $# -gt 1 ]]; then
+    die "usage: $0 switch [地区或节点名]"
+  elif [[ $# -eq 1 ]]; then
+    switch_to_query "$1"
+    return
+  fi
+
+  data="$(selector_json)"
+  echo "当前节点: $(jq -r '.now' <<< "$data")"
+  jq -r '.all | to_entries[] | "\(.key + 1)) \(.value)"' <<< "$data"
+  printf "请输入节点编号: "
+  read -r choice
+  [[ "$choice" =~ ^[0-9]+$ ]] || die "please enter a valid node number"
+  node="$(jq -r --argjson index "$((choice - 1))" '.all[$index] // empty' <<< "$data")"
+  [[ -n "$node" ]] || die "node number out of range: $choice"
+  switch_to_query "$node"
+}
+
+cmd_set_default_node() {
+  [[ $# -eq 1 ]] || die "usage: $0 set-default-node 地区或节点名"
+  switch_to_query "$1"
+  save_env_var DEFAULT_NODE "$1"
+  info "default node saved: $1 (applied automatically on future starts)"
 }
 
 cmd_stop() {
@@ -470,6 +596,7 @@ cmd_config() {
   echo "SHELL_RC_FILE=$SHELL_RC_FILE"
   echo "MIXED_PORT=$MIXED_PORT"
   echo "SUB_URL=$(mask_url "$SUB_URL")"
+  echo "DEFAULT_NODE=${DEFAULT_NODE:-}"
 }
 
 main() {
@@ -485,6 +612,9 @@ main() {
     stop) cmd_stop "$@" ;;
     restart) cmd_restart "$@" ;;
     status) cmd_status "$@" ;;
+    nodes) cmd_nodes "$@" ;;
+    switch) cmd_switch "$@" ;;
+    set-default-node) cmd_set_default_node "$@" ;;
     logs) cmd_logs "$@" ;;
     env) cmd_env "$@" ;;
     env-clear) cmd_env_clear "$@" ;;
