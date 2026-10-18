@@ -11,13 +11,21 @@ PROXY_ENV_FILE="${MIHOMO_PROXY_ENV:-$CONFIG_DIR/proxy.env}"
 SHELL_RC_FILE="${MIHOMO_SHELL_RC:-$HOME/.bashrc}"
 MIXED_PORT="${MIHOMO_PORT:-7897}"
 DEFAULT_UA="${MIHOMO_USER_AGENT:-Clash.Meta}"
-DEFAULT_SELECTOR="${MIHOMO_SELECTOR:-🔰 选择节点}"
+DEFAULT_SELECTOR="${MIHOMO_SELECTOR:-}"
+PROFILE_DIR="$CONFIG_DIR/profiles"
+if [[ -z "${MIHOMO_PORT:-}" && -f "$CONFIG_FILE" ]]; then
+  saved_port=$(sed -nE 's/^mixed-port: *([0-9]+).*/\1/p' "$CONFIG_FILE" | head -n1)
+  MIXED_PORT="${saved_port:-7897}"
+fi
 
 usage() {
   cat <<'USAGE'
 mihomoctl - small Clash/Mihomo manager for remote Linux servers
 
 Usage:
+  ./mihomoctl.sh profile {list|save NAME|add NAME URL|use NAME}
+  ./mihomoctl.sh groups
+  ./mihomoctl.sh set-selector GROUP
   ./mihomoctl.sh init
   ./mihomoctl.sh set-url 'https://example.com/api/v1/client/subscribe?token=xxx&flag=clash'
   ./mihomoctl.sh set-token NEW_TOKEN
@@ -44,7 +52,7 @@ Environment overrides:
   MIHOMO_PORT        default: 7897
   MIHOMO_PROXY_ENV   default: ~/.config/mihomo/proxy.env
   MIHOMO_SHELL_RC    default: ~/.bashrc
-  MIHOMO_SELECTOR    default: 🔰 选择节点
+  MIHOMO_SELECTOR    default: saved selector, or auto-detect a single Selector
 
 Notes:
   - Tokens are stored in ~/.config/mihomo/subscription.env with chmod 600.
@@ -125,6 +133,7 @@ load_env() {
   SUB_URL="${SUB_URL:-}"
   USER_AGENT="${USER_AGENT:-$DEFAULT_UA}"
   DEFAULT_NODE="${DEFAULT_NODE:-}"
+  DEFAULT_SELECTOR="${MIHOMO_SELECTOR:-${SELECTOR:-}}"
 }
 
 require_api_tools() {
@@ -143,7 +152,7 @@ api_settings() {
 }
 
 api_curl() {
-  local args=(--silent --show-error --fail --connect-timeout 3 --max-time 10)
+  local args=(--noproxy '*' --silent --show-error --fail --connect-timeout 3 --max-time 10)
   [[ -n "$API_SECRET" ]] && args+=(-H "Authorization: Bearer $API_SECRET")
   curl "${args[@]}" "$@"
 }
@@ -154,8 +163,37 @@ selector_url() {
 
 selector_json() {
   require_api_tools
+  load_env
   api_settings
-  api_curl "$(selector_url)" || die "cannot connect to Mihomo API at $API_BASE; start Mihomo first"
+  local data groups count
+  data="$(api_curl "$API_BASE/proxies")" || die "Mihomo /proxies request failed at $API_BASE (check controller, secret and logs)"
+  jq -e '.proxies | type == "object"' <<< "$data" >/dev/null || die "invalid Mihomo API response"
+  groups="$(jq -c '[.proxies | to_entries[] | select(.value.type == "Selector") | .key]' <<< "$data")"
+  if [[ -z "$DEFAULT_SELECTOR" ]]; then
+    count="$(jq length <<< "$groups")"
+    if [[ "$count" -eq 1 ]]; then
+      DEFAULT_SELECTOR="$(jq -r '.[0]' <<< "$groups")"
+    else
+      echo "Available selector groups:" >&2
+      jq -r '.[]' <<< "$groups" >&2
+      die "choose a group with: $0 set-selector 'GROUP'"
+    fi
+  fi
+  jq -e --arg g "$DEFAULT_SELECTOR" '.proxies[$g] | select(.type == "Selector")' <<< "$data" || die "selector '$DEFAULT_SELECTOR' not found; run '$0 groups'"
+}
+
+cmd_groups() {
+  require_api_tools
+  api_settings
+  api_curl "$API_BASE/proxies" | jq -r '.proxies | to_entries[] | select(.value.type == "Selector") | .key'
+}
+
+cmd_set_selector() {
+  [[ $# -eq 1 ]] || die "usage: $0 set-selector GROUP"
+  (MIHOMO_SELECTOR="$1" selector_json >/dev/null) || return 1
+  save_env_var SELECTOR "$1"
+  persist_profile
+  info "selector saved: $1"
 }
 
 region_query() {
@@ -176,13 +214,19 @@ region_query() {
 }
 
 resolve_node() {
-  local query
-  query="$(region_query "$1")"
-  jq -r --arg query "$query" '
-    ([.all[] | select(. == $query)][0]
-      // [.all[] | select(contains($query))][0]
-      // empty)
-  '
+  local query="$1" translated pattern
+  translated="$(region_query "$query")"
+  case "${query,,}" in
+    us|usa|美国) pattern='美国|United States|(^|[^a-z])USA?([^a-z]|$)|🇺🇸' ;;
+    uk|gb|英国) pattern='英国|United Kingdom|UK|GB|🇬🇧' ;;
+    jp|日本) pattern='日本|Japan|JP|🇯🇵' ;;
+    hk|香港) pattern='香港|Hong Kong|HK|🇭🇰' ;;
+    sg|新加坡) pattern='新加坡|Singapore|SG|🇸🇬' ;;
+    *) pattern='' ;;
+  esac
+  jq -r --arg q "$query" --arg t "$translated" --arg p "$pattern" '
+    ([.all[] | select(. == $q)][0]
+    // [.all[] | select(if $p != "" then test($p; "i") else (ascii_downcase | contains($q | ascii_downcase)) or contains($t) end)][0] // empty)'
 }
 
 switch_to_query() {
@@ -190,12 +234,13 @@ switch_to_query() {
   local data node
   require_api_tools
   api_settings
-  data="$(selector_json)"
+  data="$(selector_json)" || return 1
+  DEFAULT_SELECTOR="$(jq -r .name <<< "$data")"
   node="$(resolve_node "$query" <<< "$data")"
   [[ -n "$node" ]] || die "no node matching '$query'; run '$0 nodes' to see available nodes"
   api_curl -X PUT "$(selector_url)" \
     -H "Content-Type: application/json" \
-    --data "$(jq -nc --arg name "$node" '{name: $name}')" >/dev/null
+    --data "$(jq -nc --arg name "$node" '{name: $name}')" >/dev/null || return 1
   info "switched to: $node"
 }
 
@@ -234,16 +279,7 @@ save_env_var() {
 }
 
 mask_url() {
-  sed -E 's/(token=)[^&[:space:]]+/\1***MASKED***/g' <<< "${1:-}"
-}
-
-ensure_clash_flag() {
-  local url="$1"
-  case "$url" in
-    *"flag="*) printf "%s" "$url" ;;
-    *"?"*) printf "%s&flag=clash" "$url" ;;
-    *) printf "%s?flag=clash" "$url" ;;
-  esac
+  [[ -z "${1:-}" ]] || printf "[saved URL hidden]\n"
 }
 
 download_to() {
@@ -264,7 +300,7 @@ validate_config() {
   local file="$1"
   [[ -s "$file" ]] || die "downloaded config is empty: $file"
 
-  if grep -Eq '^(proxies|proxy-groups|rules|mixed-port|port|socks-port|redir-port|tproxy-port):' "$file"; then
+  if grep -Eq '^(proxies|proxy-providers|proxy-groups|rules|mixed-port|port|socks-port|redir-port|tproxy-port):' "$file"; then
     return 0
   fi
 
@@ -274,11 +310,14 @@ validate_config() {
     die "subscription looks like raw/base64 node list, not Clash/Mihomo YAML. Use a Clash/Mihomo subscription URL, usually with &flag=clash."
   fi
 
-  info "warning: config was downloaded, but YAML shape was not recognized. Continuing anyway."
+  die "subscription is not a recognized Clash/Mihomo YAML config"
 }
 
 normalize_config_port() {
   local file="$1"
+  if ! grep -Eq '^external-controller:' "$file"; then
+    sed -i '1iexternal-controller: 127.0.0.1:9090' "$file"
+  fi
 
   if grep -Eq '^mixed-port:' "$file"; then
     sed -i -E "s/^mixed-port:.*/mixed-port: $MIXED_PORT/" "$file"
@@ -320,10 +359,11 @@ cmd_init() {
 cmd_set_url() {
   [[ $# -eq 1 ]] || die "usage: $0 set-url 'SUBSCRIPTION_URL'"
   local url
-  url="$(ensure_clash_flag "$1")"
+  url="$1"
   save_env_var SUB_URL "$url"
   save_env_var USER_AGENT "$DEFAULT_UA"
-  info "subscription URL saved: $(mask_url "$url")"
+  info "subscription URL saved"
+  persist_profile
 }
 
 cmd_set_token() {
@@ -341,9 +381,10 @@ cmd_set_token() {
   else
     suffix=""
   fi
-  new_url="$(ensure_clash_flag "${prefix}${token}${suffix}")"
+  new_url="${prefix}${token}${suffix}"
   save_env_var SUB_URL "$new_url"
-  info "token replaced: $(mask_url "$new_url")"
+  info "token replaced"
+  persist_profile
   info "run './mihomoctl.sh fetch' then './mihomoctl.sh restart' to apply it"
 }
 
@@ -353,10 +394,12 @@ cmd_fetch() {
   [[ -n "$SUB_URL" ]] || die "SUB_URL is empty. Run set-url first."
   local tmp
   tmp="$(mktemp "$CONFIG_DIR/config.yaml.XXXXXX")"
-  info "downloading config from: $(mask_url "$SUB_URL")"
-  download_to "$SUB_URL" "$tmp" "$USER_AGENT"
-  validate_config "$tmp"
-  normalize_config_port "$tmp"
+  info "downloading subscription config"
+  if ! (download_to "$SUB_URL" "$tmp" "$USER_AGENT" && validate_config "$tmp" && normalize_config_port "$tmp"); then
+    rm -f "$tmp"
+    die "subscription download/validation failed; old config kept"
+  fi
+  "$BIN" -t -d "$CONFIG_DIR" -f "$tmp" >/dev/null || { rm -f "$tmp"; die "config validation failed; old config kept"; }
   mv "$tmp" "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
   info "config saved: $CONFIG_FILE"
@@ -364,26 +407,30 @@ cmd_fetch() {
 
 cmd_start() {
   init_dirs
+  require_api_tools
   [[ -x "$BIN" ]] || die "mihomo/clash binary not executable: $BIN"
   [[ -f "$CONFIG_FILE" ]] || die "config not found: $CONFIG_FILE. Run fetch first."
 
   if pid="$(running_pid)"; then
     info "already running, pid=$pid"
-    normalize_config_port "$CONFIG_FILE"
+    local configured_port
+    configured_port=$(sed -nE 's/^mixed-port: *([0-9]+).*/\1/p' "$CONFIG_FILE" | head -n1)
+    [[ "$configured_port" == "$MIXED_PORT" ]] || die "port change requires restart"
     install_shell_env_hook
     write_proxy_env on
     return 0
   fi
 
   normalize_config_port "$CONFIG_FILE"
+  "$BIN" -t -d "$CONFIG_DIR" -f "$CONFIG_FILE" >/dev/null || die "config validation failed"
   install_shell_env_hook
   info "starting in background..."
   local log_start
   log_start="$(wc -l < "$LOG_FILE" 2>/dev/null || printf "0")"
   if command -v setsid >/dev/null 2>&1; then
-    setsid "$BIN" -d "$CONFIG_DIR" >> "$LOG_FILE" 2>&1 < /dev/null &
+    setsid "$BIN" -d "$CONFIG_DIR" -f "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 < /dev/null &
   else
-    nohup "$BIN" -d "$CONFIG_DIR" >> "$LOG_FILE" 2>&1 &
+    nohup "$BIN" -d "$CONFIG_DIR" -f "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
   fi
   local pid=$!
   echo "$pid" > "$PID_FILE"
@@ -396,6 +443,21 @@ cmd_start() {
       rm -f "$PID_FILE"
       die "failed to bind mixed proxy port $MIXED_PORT"
     fi
+    require_api_tools
+    api_settings
+    local api_ready=0
+    for _ in {1..10}; do
+      if api_curl "$API_BASE/version" 2>/dev/null | jq -e '.version' >/dev/null; then
+        api_ready=1; break
+      fi
+      sleep 1
+    done
+    if [[ "$api_ready" -ne 1 ]]; then
+      kill "$pid" 2>/dev/null || true
+      rm -f "$PID_FILE"
+      write_proxy_env off
+      die "controller not ready at $API_BASE; check external-controller, secret and logs"
+    fi
     write_proxy_env on
     info "started, pid=$pid, log=$LOG_FILE"
     info "proxy env enabled in $PROXY_ENV_FILE"
@@ -403,13 +465,13 @@ cmd_start() {
     if [[ -n "$DEFAULT_NODE" ]]; then
       local ready=0
       for _ in 1 2 3 4 5; do
-        if switch_to_query "$DEFAULT_NODE"; then
+        if (switch_to_query "$DEFAULT_NODE"); then
           ready=1
           break
         fi
         sleep 1
       done
-      [[ "$ready" -eq 1 ]] || die "started, but failed to apply default node: $DEFAULT_NODE"
+      [[ "$ready" -eq 1 ]] || echo "WARNING: started, but default node could not be applied; run groups / set-selector / switch" >&2
     fi
   else
     tail -n 80 "$LOG_FILE" >&2 || true
@@ -419,7 +481,8 @@ cmd_start() {
 
 cmd_nodes() {
   local data
-  data="$(selector_json)"
+  data="$(selector_json)" || return 1
+  DEFAULT_SELECTOR="$(jq -r .name <<< "$data")"
   echo "Selector : $DEFAULT_SELECTOR"
   echo "Current  : $(jq -r '.now' <<< "$data")"
   echo
@@ -435,7 +498,8 @@ cmd_switch() {
     return
   fi
 
-  data="$(selector_json)"
+  data="$(selector_json)" || return 1
+  DEFAULT_SELECTOR="$(jq -r .name <<< "$data")"
   echo "当前节点: $(jq -r '.now' <<< "$data")"
   jq -r '.all | to_entries[] | "\(.key + 1)) \(.value)"' <<< "$data"
   printf "请输入节点编号: "
@@ -450,6 +514,7 @@ cmd_set_default_node() {
   [[ $# -eq 1 ]] || die "usage: $0 set-default-node 地区或节点名"
   switch_to_query "$1"
   save_env_var DEFAULT_NODE "$1"
+  persist_profile
   info "default node saved: $1 (applied automatically on future starts)"
 }
 
@@ -599,6 +664,71 @@ cmd_config() {
   echo "DEFAULT_NODE=${DEFAULT_NODE:-}"
 }
 
+profile_path() {
+  [[ "$1" =~ ^[a-zA-Z0-9_-]+$ ]] || die "profile name must contain only letters, digits, _ or -"
+  printf '%s/%s.env' "$PROFILE_DIR" "$1"
+}
+
+persist_profile() {
+  if [[ -f "$CONFIG_DIR/active-profile" ]]; then
+    local name target
+    name=$(cat "$CONFIG_DIR/active-profile")
+    target=$(profile_path "$name")
+    cp "$ENV_FILE" "$target"
+    chmod 600 "$target"
+  fi
+}
+
+cmd_profile() {
+  local action="${1:-list}" name target
+  shift || true
+  mkdir -p "$PROFILE_DIR"
+  chmod 700 "$PROFILE_DIR"
+  case "$action" in
+    list)
+      local f
+      for f in "$PROFILE_DIR"/*.env; do
+        [[ -f "$f" ]] || continue
+        basename "$f" .env
+      done
+      if [[ -f "$CONFIG_DIR/active-profile" ]]; then
+        printf 'Active: '; cat "$CONFIG_DIR/active-profile"
+      fi ;;
+    save)
+      [[ $# -eq 1 ]] || die "usage: $0 profile save NAME"
+      target=$(profile_path "$1")
+      [[ -f "$ENV_FILE" ]] || die "set-url first"
+      cp "$ENV_FILE" "$target"
+      chmod 600 "$target"
+      info "profile saved: $1" ;;
+    add)
+      [[ $# -eq 2 ]] || die "usage: $0 profile add NAME URL"
+      target=$(profile_path "$1")
+      [[ ! -e "$target" ]] || die "profile already exists"
+      (umask 077; printf 'SUB_URL=%q\nUSER_AGENT=%q\nDEFAULT_NODE=\nSELECTOR=\n' "$2" "$DEFAULT_UA" > "$target")
+      info "profile added: $1" ;;
+    use)
+      [[ $# -eq 1 ]] || die "usage: $0 profile use NAME"
+      name="$1"; target=$(profile_path "$name")
+      [[ -f "$target" ]] || die "unknown profile: $name"
+      # Download and validate before changing the active subscription or stopping it.
+      local staged
+      staged=$(mktemp "$CONFIG_DIR/.profile-config.XXXXXX")
+      if ! ( ENV_FILE="$target"; CONFIG_FILE="$staged"; unset SUB_URL USER_AGENT DEFAULT_NODE SELECTOR; cmd_fetch ); then
+        rm -f "$staged"
+        return 1
+      fi
+      cmd_stop
+      mv "$staged" "$CONFIG_FILE"
+      cp "$target" "$ENV_FILE"
+      chmod 600 "$ENV_FILE"
+      printf '%s\n' "$name" > "$CONFIG_DIR/active-profile"
+      chmod 600 "$CONFIG_DIR/active-profile"
+      cmd_start ;;
+    *) die "usage: $0 profile {list|save NAME|add NAME URL|use NAME}" ;;
+  esac
+}
+
 main() {
   local cmd="${1:-help}"
   shift || true
@@ -612,6 +742,9 @@ main() {
     stop) cmd_stop "$@" ;;
     restart) cmd_restart "$@" ;;
     status) cmd_status "$@" ;;
+    groups) cmd_groups "$@" ;;
+    set-selector) cmd_set_selector "$@" ;;
+    profile) cmd_profile "$@" ;;
     nodes) cmd_nodes "$@" ;;
     switch) cmd_switch "$@" ;;
     set-default-node) cmd_set_default_node "$@" ;;

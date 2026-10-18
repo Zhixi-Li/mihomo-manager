@@ -83,7 +83,7 @@ wget -O ~/.config/mihomo/GeoSite.dat https://github.com/ewigl/mihomo/raw/master/
 
 ```bash
 cd ~/.config/mihomo
-git clone https://github.com/BillyLiu312/mihomo-manager.git manager
+git clone https://github.com/Zhixi-Li/mihomo-manager.git manager
 ```
 
 进入仓库并确认脚本可执行：
@@ -109,7 +109,7 @@ cd ~/.config/mihomo/manager
 ./mihomoctl.sh fetch
 ```
 
-`set-url` 会自动补上 `flag=clash`，并把 token 存到：
+`set-url` 原样保存 URL（不再擅自添加可能破坏签名的 `flag=clash` 参数），存到：
 
 ```text
 ~/.config/mihomo/subscription.env
@@ -140,7 +140,7 @@ cd ~/.config/mihomo/manager
 `start` 会做几件事：
 
 - 把 `config.yaml` 里的 `mixed-port` 写成当前脚本端口，默认是 `7897`
-- 如果 `~/.config/mihomo/mihomo.pid` 指向的进程还活着，只刷新端口配置和 `proxy.env`，不会重复启动
+- 如果 `~/.config/mihomo/mihomo.pid` 指向的进程还活着，检查端口是否一致并刷新 `proxy.env`；端口改变时要求执行 `restart`，不会重复启动
 - 后台启动 mihomo，并把日志写到 `~/.config/mihomo/mihomo.log`
 - 启动成功后把代理环境变量写入 `~/.config/mihomo/proxy.env`
 
@@ -173,7 +173,7 @@ cd ~/.config/mihomo/manager
 如果你想换端口，可以在命令前设置 `MIHOMO_PORT`。例如：
 
 ```bash
-MIHOMO_PORT=7890 ./mihomoctl.sh start
+MIHOMO_PORT=7890 ./mihomoctl.sh restart
 ```
 
 脚本会把 `config.yaml` 的 `mixed-port` 同步改成这个端口，并让 `env`、`run`、`test` 等命令使用同一个端口。
@@ -366,3 +366,58 @@ MIHOMO_PORT=7898 ./mihomoctl.sh restart
 ```bash
 export MIHOMO_PORT=7898
 ```
+
+
+## 11. 多订阅保存与一键切换（新版）
+
+先保存现有订阅，再添加其他订阅。名称只接受字母、数字、下划线和连字符：
+
+```bash
+./mihomoctl.sh profile save old
+./mihomoctl.sh profile add provider-b 'https://你的第二个Clash订阅URL'
+./mihomoctl.sh profile list
+./mihomoctl.sh profile use provider-b
+./mihomoctl.sh profile use old
+```
+
+`profile use` 自动下载、校验配置并重启，无需再执行 fetch/restart。下载或校验失败会保留原配置和订阅。启动后的运行情况仍需通过 `status`/`test` 检查（例如端口冲突或订阅节点不可达）。订阅必须输出完整 Clash/Mihomo YAML；脚本不提供订阅格式转换服务。下载使用 Clash.Meta User-Agent；如服务商要求特定参数，请自行保留在 URL 中。
+
+每份订阅单独保存 URL、User-Agent、默认节点及节点组，文件位于 `~/.config/mihomo/profiles/`，权限为 600。使用 `profile use` 激活后，`set-url`、`set-token`、`set-selector` 和 `set-default-node` 的修改也会同步到该订阅。不要将这些私密文件提交 Git。
+
+### 不同订阅的节点组
+
+新版通过 `/proxies` 查询节点组，不再写死“🔰 选择节点”。只有一个 Selector 时自动使用；多个时列出可选组，需要明确选择一次：
+
+```bash
+./mihomoctl.sh groups
+./mihomoctl.sh set-selector '你的主代理组名'
+./mihomoctl.sh nodes
+./mihomoctl.sh switch US
+./mihomoctl.sh set-default-node US
+```
+
+下次切回这份订阅会恢复以上设置。`MIHOMO_SELECTOR` 仍可临时覆盖。仅对所选组的直接候选进行切换；若该组的候选是子组，需要通过 `set-selector` 选择实际包含节点的子组。脚本不改写服务商的路由规则，不会自动把所有流量改成全局模式。
+
+US/UK/JP/HK/SG 支持常见中英文和旗帜命名；其他地区支持原有中文别名或直接输入节点名。精确节点名优先，其次匹配列表中的第一个候选，不自动测速。
+
+### 原来的 404 与端口问题
+
+`/proxies/组名` 的 404 通常表示节点组不存在，并不表示 Mihomo 没启动。新版先查询 `/proxies`，提供具体组名提示。本机 API 请求强制绕过 HTTP/SOCKS 代理。缺少 external-controller 时补入本机 `127.0.0.1:9090`；已有的 controller 和 secret 保留。启动会等待 `/version` 返回有效版本，才启用代理环境文件。
+
+`start` 对已运行进程不会热更新端口。修改端口请使用：
+
+```bash
+MIHOMO_PORT=7890 ./mihomoctl.sh restart
+. ~/.config/mihomo/proxy.env
+```
+
+后续命令从 config.yaml 读取已保存的 mixed-port，不需要每次传环境变量。`set-url` 只是保存地址，普通订阅更新仍需 `fetch` 后 `restart`；`profile use` 会完成整套操作。
+
+### 开发验证
+
+```bash
+bash -n mihomoctl.sh
+python3 -m unittest discover -s tests -v
+```
+
+测试使用本机模拟 API 和临时目录，不下载真实订阅、不需要运行 Mihomo。

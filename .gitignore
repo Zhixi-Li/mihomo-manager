@@ -6,3 +6,9 @@ GeoSite.dat
 GeoIP.dat
 geosite.dat
 geoip.dat
+
+
+profiles/
+active-profile
+proxy.env
+__pycache__/
